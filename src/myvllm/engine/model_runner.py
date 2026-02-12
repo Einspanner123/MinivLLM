@@ -54,7 +54,11 @@ class ModelRunner:
         if config.get("model_name_or_path"):
             from myvllm.utils.loader import load_weights_from_checkpoint
 
-            load_weights_from_checkpoint(self.model, config["model_name_or_path"])
+            load_weights_from_checkpoint(
+                self.model,
+                config["model_name_or_path"],
+                cache_dir=config.get("cache_dir"),
+            )
 
         # Load weights in CPU (move the model to GPU after loading weights)
         # self.model = self.model.cuda(rank)

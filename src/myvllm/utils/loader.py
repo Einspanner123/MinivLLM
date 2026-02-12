@@ -15,7 +15,9 @@ def default_weight_loader(param, weight):
     param.data.copy_(weight)
 
 
-def load_weights_from_checkpoint(model: nn.Module, model_name_or_path: str):
+def load_weights_from_checkpoint(
+    model: nn.Module, model_name_or_path: str, cache_dir: str = None
+):
     """
     Load weights from a Hugging Face model checkpoint into the custom model.
     Handles QKV and gate_up weight merging for optimized layers.
@@ -23,6 +25,7 @@ def load_weights_from_checkpoint(model: nn.Module, model_name_or_path: str):
     Args:
         model: The target model to load weights into
         model_name_or_path: Path to local checkpoint or Hugging Face model name
+        cache_dir: Optional path to download/cache the model
     """
     from huggingface_hub import snapshot_download
 
@@ -40,6 +43,7 @@ def load_weights_from_checkpoint(model: nn.Module, model_name_or_path: str):
         try:
             checkpoint_path = snapshot_download(
                 repo_id=model_name_or_path,
+                cache_dir=cache_dir,
                 allow_patterns=["*.safetensors", "*.json"],
                 ignore_patterns=[
                     "*.msgpack",

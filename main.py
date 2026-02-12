@@ -44,9 +44,11 @@ config = {
 
 
 def main():
-    path = os.path.expanduser("~/huggingface/Qwen3-0.6B/")
+    path = os.path.expanduser("./huggingface/Qwen3-0.6B/")
     model_name = config.get("model_name_or_path", "Qwen/Qwen3-0.6B")
     tokenizer = AutoTokenizer.from_pretrained(model_name, cache_dir=path)
+
+    config["cache_dir"] = path
     llm = LLM(config=config)
 
     # max_tokens is the max number of generated tokens
