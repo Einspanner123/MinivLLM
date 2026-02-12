@@ -2,6 +2,10 @@ import os
 import sys
 from pathlib import Path
 
+# Set HF mirror for better connectivity
+os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"
+os.environ["HF_HUB_HTTP_TIMEOUT"] = "60"  # Increase timeout to 60s
+
 from transformers import AutoTokenizer
 
 # Add src to Python path

@@ -391,7 +391,7 @@ def benchmark(
     torch.cuda.synchronize()
     start = time.perf_counter()
     for _ in range(num_iterations):
-        _ = naive_decode_attention(  # out_naive
+        out_naive = naive_decode_attention(
             q,
             k_cache,
             v_cache,
@@ -427,7 +427,7 @@ def benchmark(
     torch.cuda.synchronize()
     start = time.perf_counter()
     for _ in range(num_iterations):
-        _ = decode_torch_optimized(  # out_pytorch
+        out_pytorch = decode_torch_optimized(
             q,
             k_cache,
             v_cache,
@@ -463,7 +463,7 @@ def benchmark(
     torch.cuda.synchronize()
     start = time.perf_counter()
     for _ in range(num_iterations):
-        _ = paged_attention_decode_triton(  # out_triton
+        out_triton = paged_attention_decode_triton(
             q,
             k_cache,
             v_cache,
