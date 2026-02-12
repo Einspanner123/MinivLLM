@@ -1,25 +1,27 @@
-import xxhash
-import numpy as np
 from collections import deque
 
+import numpy as np
+import xxhash
+
 from myvllm.engine.sequence import Sequence
+
 
 class Block:
     def __init__(self, block_id):
         self.block_id = block_id
-        self.hash = -1 
+        self.hash = -1
         self.ref_count = 0
         self.token_ids = []
 
-
     def update(self, h: int, token_ids: list[int]):
-        self.hash = h 
+        self.hash = h
         self.token_ids = token_ids
 
     def reset(self):
-        self.hash = -1 
+        self.hash = -1
         self.ref_count = 0
         self.token_ids = []
+
 
 class BlockManager:
     def __init__(self, num_blocks: int, block_size: int):
@@ -39,7 +41,7 @@ class BlockManager:
     def compute_hash(self, token_ids: list[int], prefix_hash_value: int) -> int:
         h = xxhash.xxh64()
         if prefix_hash_value != -1:
-            h.update(prefix_hash_value.to_bytes(8, 'little'))
+            h.update(prefix_hash_value.to_bytes(8, "little"))
         h.update(np.array(token_ids, dtype=np.int32).tobytes())
         return h.intdigest()
 
@@ -63,7 +65,6 @@ class BlockManager:
     def can_allocate(self, seq: Sequence) -> bool:
         return len(self.free_block_ids) >= seq.num_blocks
 
-
     def allocate(self, seq: Sequence) -> None:
         h = -1
         for i in range(seq.num_blocks):
@@ -71,16 +72,20 @@ class BlockManager:
 
             token_ids = seq.block(i)
             # only compute hash for full blocks, always -1 for partial blocks
-            h = self.compute_hash(token_ids=token_ids, prefix_hash_value=h) if len(token_ids) == self.block_size else -1
+            h = (
+                self.compute_hash(token_ids=token_ids, prefix_hash_value=h)
+                if len(token_ids) == self.block_size
+                else -1
+            )
             block_id = self.hash_to_block_id.get(h, -1)
-            
+
             # if cache miss or hash collision
             if block_id == -1 or self.blocks[block_id].token_ids != token_ids:
                 no_cache_found = True
 
             if not no_cache_found:
                 # update sequence information
-                seq.num_cached_tokens += self.block_size # which == len(token_ids)
+                seq.num_cached_tokens += self.block_size  # which == len(token_ids)
                 # update block information, considering the edge case that the block is not allocated yet but with hash code
                 if block_id not in self.used_block_ids:
                     block = self._allocate_block(block_id)
@@ -95,7 +100,7 @@ class BlockManager:
                 if h != -1:
                     self.hash_to_block_id[h] = block.block_id
             seq.block_table.append(block.block_id)
-        
+
     def deallocate(self, seq: Sequence) -> None:
         # update block information
         for block_id in seq.block_table:
@@ -123,7 +128,12 @@ class BlockManager:
 
         # if the last block is now full, compute hash
         if seq.num_tokens % self.block_size == 0:
-            h = self.compute_hash(token_ids = seq.block(seq.num_blocks - 1), prefix_hash_value = -1 if len(block_tables) == 1 else self.blocks[block_tables[-2]].hash)
+            h = self.compute_hash(
+                token_ids=seq.block(seq.num_blocks - 1),
+                prefix_hash_value=-1
+                if len(block_tables) == 1
+                else self.blocks[block_tables[-2]].hash,
+            )
             block = self.blocks[last_block_for_seq_id]
             block.update(h=h, token_ids=seq.block(seq.num_blocks - 1))
             self.hash_to_block_id[h] = block.block_id
@@ -135,5 +145,9 @@ class BlockManager:
             block_tables.append(block.block_id)
         # else, do nothing
         else:
-            assert last_block_for_seq_id in self.used_block_ids, "Last block should be allocated"
-            assert self.blocks[last_block_for_seq_id].hash == -1, "Last block should be partial block with hash -1"
+            assert last_block_for_seq_id in self.used_block_ids, (
+                "Last block should be allocated"
+            )
+            assert self.blocks[last_block_for_seq_id].hash == -1, (
+                "Last block should be partial block with hash -1"
+            )

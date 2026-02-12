@@ -1,14 +1,16 @@
 import math
-import torch
 import pickle
-import torch.distributed as dist
-from multiprocessing.synchronize import Event
 from multiprocessing.shared_memory import SharedMemory
+from multiprocessing.synchronize import Event
 
-from myvllm.models.qwen3 import Qwen3ForCausalLM
-from myvllm.layers.sampler import SamplerLayer
+import torch
+import torch.distributed as dist
+
 from myvllm.engine.sequence import Sequence
-from myvllm.utils import *
+from myvllm.layers.sampler import SamplerLayer
+from myvllm.models.qwen3 import Qwen3ForCausalLM
+from myvllm.utils import get_context, reset_context, set_context
+
 
 class ModelRunner:
     def __init__(self, config: dict, rank: int, event: Event | list[Event]):
@@ -16,30 +18,32 @@ class ModelRunner:
         self.event = event
 
         # set distributed config
-        self.block_size = config['block_size']
-        self.world_size = config['world_size']
-        self.enforce_eager = config.get('enforce_eager', False)
+        self.block_size = config["block_size"]
+        self.world_size = config["world_size"]
+        self.enforce_eager = config.get("enforce_eager", False)
 
         self.rank = rank
-        dist.init_process_group('nccl', "tcp://localhost:12345", world_size=config['world_size'], rank=rank)
+        dist.init_process_group(
+            "nccl", "tcp://localhost:12345", world_size=config["world_size"], rank=rank
+        )
         torch.cuda.set_device(rank)
 
         # set model
         self.model = Qwen3ForCausalLM(
-            vocab_size=config['vocab_size'],
-            hidden_size=config['hidden_size'],
-            num_heads=config['num_heads'],
-            head_dim=config['head_dim'],
-            scale=config['scale'],
-            num_kv_heads=config['num_kv_heads'],
-            rms_norm_epsilon=config['rms_norm_epsilon'],
-            qkv_bias=config['qkv_bias'],
-            base=config['base'],
-            max_position=config['max_position'],
-            intermediate_size=config['intermediate_size'],
-            ffn_bias=config['ffn_bias'],
-            num_layers=config['num_layers'],
-            tie_word_embeddings=config['tie_word_embeddings'],
+            vocab_size=config["vocab_size"],
+            hidden_size=config["hidden_size"],
+            num_heads=config["num_heads"],
+            head_dim=config["head_dim"],
+            scale=config["scale"],
+            num_kv_heads=config["num_kv_heads"],
+            rms_norm_epsilon=config["rms_norm_epsilon"],
+            qkv_bias=config["qkv_bias"],
+            base=config["base"],
+            max_position=config["max_position"],
+            intermediate_size=config["intermediate_size"],
+            ffn_bias=config["ffn_bias"],
+            num_layers=config["num_layers"],
+            tie_word_embeddings=config["tie_word_embeddings"],
             block_size=self.block_size,
         )
 
@@ -47,9 +51,10 @@ class ModelRunner:
         self.model = self.model.cuda(rank)
 
         # Load pretrained weights if model_name_or_path is provided
-        if config.get('model_name_or_path'):
+        if config.get("model_name_or_path"):
             from myvllm.utils.loader import load_weights_from_checkpoint
-            load_weights_from_checkpoint(self.model, config['model_name_or_path'])
+
+            load_weights_from_checkpoint(self.model, config["model_name_or_path"])
 
         # Load weights in CPU (move the model to GPU after loading weights)
         # self.model = self.model.cuda(rank)
@@ -70,7 +75,7 @@ class ModelRunner:
         if not self.enforce_eager:
             self.capture_cudagraph()
 
-        torch.set_default_device(f'cuda:{rank}')
+        torch.set_default_device(f"cuda:{rank}")
         torch.set_default_dtype(self.default_dtype)
 
         # IMPORTANT: Set up shared memory and barrier AFTER all model initialization
@@ -81,39 +86,43 @@ class ModelRunner:
             if self.rank == 0:
                 # Try to clean up existing shared memory first
                 try:
-                    old_shm = SharedMemory(name='myvllm')
+                    old_shm = SharedMemory(name="myvllm")
                     old_shm.close()
                     old_shm.unlink()
                 except FileNotFoundError:
                     pass  # Doesn't exist, which is fine
-                self.shm = SharedMemory(name='myvllm', create=True, size=2**20)
+                self.shm = SharedMemory(name="myvllm", create=True, size=2**20)
                 # Barrier to ensure rank 1 waits until shared memory is created
                 dist.barrier()
             else:
                 # Wait for rank 0 to create shared memory
                 dist.barrier()
-                self.shm = SharedMemory(name='myvllm')
+                self.shm = SharedMemory(name="myvllm")
                 # Don't call self.loop() here - let the spawning code handle it
                 # Otherwise we'll be stuck in an infinite loop during __init__
 
     # only use read when rank != 0
     def read_shm(self):
-        assert self.world_size > 1 and self.rank != 0, "read_shm can only be called when world_size > 1 and rank != 0"
+        assert self.world_size > 1 and self.rank != 0, (
+            "read_shm can only be called when world_size > 1 and rank != 0"
+        )
         self.event.wait()
-        n = int.from_bytes(self.shm.buf[:4], 'little') # read length
-        method_name, *args = pickle.loads(self.shm.buf[4:n+4])
+        n = int.from_bytes(self.shm.buf[:4], "little")  # read length
+        method_name, *args = pickle.loads(self.shm.buf[4 : n + 4])
         self.event.clear()
         return method_name, args
 
     # only use write when rank == 0
     def write_shm(self, method_name: str, args: tuple):
-        assert self.world_size > 1 and self.rank == 0, "write_shm can only be called when world_size > 1 and rank == 0"
+        assert self.world_size > 1 and self.rank == 0, (
+            "write_shm can only be called when world_size > 1 and rank == 0"
+        )
         # encode the length first
         # Flatten: (method_name, args) where args is a tuple -> (method_name, *args)
         data = pickle.dumps((method_name, *args))
         n = len(data)
-        self.shm.buf[:4] = n.to_bytes(4, 'little')
-        self.shm.buf[4:n+4] = data
+        self.shm.buf[:4] = n.to_bytes(4, "little")
+        self.shm.buf[4 : n + 4] = data
         for event in self.event:
             event.set()
 
@@ -130,16 +139,18 @@ class ModelRunner:
         # Check if process group exists before destroying
         if dist.is_initialized():
             dist.destroy_process_group()
-    
+
     # wait to read method and args from shared memory
     # execute the method with args
     # write results back to shared memory
     def loop(self):
-        assert self.world_size > 1 and self.rank != 0, "loop can only be called when world_size > 1 and rank != 0"
+        assert self.world_size > 1 and self.rank != 0, (
+            "loop can only be called when world_size > 1 and rank != 0"
+        )
         while True:
             method_name, args = self.read_shm()
-            self.call(method_name, *args) # Unpack args when calling
-            if method_name == 'exit':
+            self.call(method_name, *args)  # Unpack args when calling
+            if method_name == "exit":
                 self.exit()
                 break
 
@@ -147,7 +158,7 @@ class ModelRunner:
     # given method name and args from shared memory
     # execute the method and return results
     def call(self, method_name: str, *args: dict):
-        if self.world_size > 1 and self.rank == 0: # will be called in main engine
+        if self.world_size > 1 and self.rank == 0:  # will be called in main engine
             self.write_shm(method_name, args)
         method = getattr(self, method_name, None)
         if method:
@@ -161,10 +172,10 @@ class ModelRunner:
     def warmup_model(self):
         torch.cuda.empty_cache()
         torch.cuda.reset_peak_memory_stats()
-        max_tokens = self.config['max_num_batch_tokens']
-        max_model_length = self.config['max_model_length']
+        max_tokens = self.config["max_num_batch_tokens"]
+        max_model_length = self.config["max_model_length"]
         batch_size = max_tokens // max_model_length
-        seqs = [Sequence(token_ids=[0]*max_model_length) for _ in range(batch_size)]
+        seqs = [Sequence(token_ids=[0] * max_model_length) for _ in range(batch_size)]
         self.run(seqs, is_prefill=True)
         torch.cuda.empty_cache()
 
@@ -172,37 +183,58 @@ class ModelRunner:
     def allocate_kv_cache(self):
         # find all available memory
         free_mem, total_mem = torch.cuda.mem_get_info()
-        total_free_mem = free_mem * self.config['gpu_memory_utilization']
-        peak_mem_usage = torch.cuda.memory_stats()['allocated_bytes.all.peak']
-        current_mem_usage = torch.cuda.memory_stats()['allocated_bytes.all.current']
+        total_free_mem = free_mem * self.config["gpu_memory_utilization"]
+        peak_mem_usage = torch.cuda.memory_stats()["allocated_bytes.all.peak"]
+        current_mem_usage = torch.cuda.memory_stats()["allocated_bytes.all.current"]
         # reserve some room for peak memory usage during model execution
         available_mem = total_free_mem - (peak_mem_usage - current_mem_usage)
-        
+
         # find parameters to compute kv cache size
-        num_layers = self.config['num_layers']
-        num_kv_heads = self.config['num_kv_heads'] // self.world_size
-        head_dim = self.config['head_dim'] if 'head_dim' in self.config else self.config['hidden_size'] // self.config['num_heads']
+        num_layers = self.config["num_layers"]
+        num_kv_heads = self.config["num_kv_heads"] // self.world_size
+        head_dim = (
+            self.config["head_dim"]
+            if "head_dim" in self.config
+            else self.config["hidden_size"] // self.config["num_heads"]
+        )
 
         # check whether the current free memory can hold at least one block
         # compute the actual byte required of each block
-        block_bytes = self.block_size * 2 * num_layers * num_kv_heads * head_dim * self.default_dtype.itemsize
+        block_bytes = (
+            self.block_size
+            * 2
+            * num_layers
+            * num_kv_heads
+            * head_dim
+            * self.default_dtype.itemsize
+        )
         self.num_available_kv_blocks = int(available_mem // block_bytes)
-        assert self.num_available_kv_blocks >= 1, f'Not enough memory to hold at least one block of KV cache on rank {self.rank}'
+        assert self.num_available_kv_blocks >= 1, (
+            f"Not enough memory to hold at least one block of KV cache on rank {self.rank}"
+        )
 
         # allocate max possible kv cache for the model, instead for each sequence
         # this is the key for paged attention: one giant KV cache pool, divided into blocks
         # IMPORTANT: Use zeros() instead of empty() to avoid garbage values
-        allocated_kv_cache = torch.zeros(2, self.config['num_layers'], self.num_available_kv_blocks, self.block_size, num_kv_heads, head_dim, device=f'cuda:{self.rank}')
+        allocated_kv_cache = torch.zeros(
+            2,
+            self.config["num_layers"],
+            self.num_available_kv_blocks,
+            self.block_size,
+            num_kv_heads,
+            head_dim,
+            device=f"cuda:{self.rank}",
+        )
         layer_id = 0
         for module in self.model.modules():
-            if hasattr(module, 'k_cache') and hasattr(module, 'v_cache'):
+            if hasattr(module, "k_cache") and hasattr(module, "v_cache"):
                 module.k_cache = allocated_kv_cache[0, layer_id]
                 module.v_cache = allocated_kv_cache[1, layer_id]
                 layer_id += 1
 
     # given seqs
     # prepare the data needed for a prefill forward pass
-    # taking prefix cache into consideration: 
+    # taking prefix cache into consideration:
     # input_ids, positions, cu_seqlens_q/k, slot_mapping (where to write new KV values), block_tables (where to read KV values)
     # cu_seqlens_q = [0, 3, 5, 9]
     #               │  │  │  │
@@ -234,65 +266,109 @@ class ModelRunner:
             cu_seqlens_q.append(cu_seqlens_q[-1] + seqlens_q[-1])
             cu_seqlens_k.append(cu_seqlens_k[-1] + seqlens_k[-1])
             if seq.block_table:
-                for i, block_id in enumerate(seq.block_table[seq.num_cached_blocks:]):
+                for i, block_id in enumerate(seq.block_table[seq.num_cached_blocks :]):
                     if seq.num_cached_blocks + i != seq.num_blocks - 1:
-                        slot_mappings.extend(list(range(block_id * self.block_size, (block_id+1) * self.block_size)))
+                        slot_mappings.extend(
+                            list(
+                                range(
+                                    block_id * self.block_size,
+                                    (block_id + 1) * self.block_size,
+                                )
+                            )
+                        )
                     else:
-                        slot_mappings.extend(list(range(block_id * self.block_size, block_id * self.block_size + seq.last_block_num_tokens)))
+                        slot_mappings.extend(
+                            list(
+                                range(
+                                    block_id * self.block_size,
+                                    block_id * self.block_size
+                                    + seq.last_block_num_tokens,
+                                )
+                            )
+                        )
         if cu_seqlens_q[-1] < cu_seqlens_k[-1]:
             # pad block_tables
             all_block_tables = [seq.block_table for seq in seqs]
             max_num_blocks = max(len(bt) for bt in all_block_tables)
             for i, seq in enumerate(seqs):
-                block_table = seq.block_table + [-1]*(max_num_blocks - len(seq.block_table))
+                block_table = seq.block_table + [-1] * (
+                    max_num_blocks - len(seq.block_table)
+                )
                 block_tables.append(block_table)
-        input_ids = torch.tensor(input_ids, dtype=torch.long, pin_memory=True).cuda(non_blocking=True)
-        slot_mapping_tensor = torch.tensor(slot_mappings, dtype=torch.long, pin_memory=True).cuda(non_blocking=True)
+        input_ids = torch.tensor(input_ids, dtype=torch.long, pin_memory=True).cuda(
+            non_blocking=True
+        )
+        slot_mapping_tensor = torch.tensor(
+            slot_mappings, dtype=torch.long, pin_memory=True
+        ).cuda(non_blocking=True)
 
         set_context(
             is_prefill=True,
-            cu_seqlens_q=torch.tensor(cu_seqlens_q, dtype=torch.int32, pin_memory=True).cuda(non_blocking=True),
-            cu_seqlens_k=torch.tensor(cu_seqlens_k, dtype=torch.int32, pin_memory=True).cuda(non_blocking=True),
+            cu_seqlens_q=torch.tensor(
+                cu_seqlens_q, dtype=torch.int32, pin_memory=True
+            ).cuda(non_blocking=True),
+            cu_seqlens_k=torch.tensor(
+                cu_seqlens_k, dtype=torch.int32, pin_memory=True
+            ).cuda(non_blocking=True),
             max_seqlen_q=max(seqlens_q),
             max_seqlen_k=max(seqlens_k),
             slot_mapping=slot_mapping_tensor,
             context_lens=None,
-            block_tables=torch.tensor(block_tables, dtype=torch.int32, pin_memory=True).cuda(non_blocking=True) if block_tables else None,
+            block_tables=torch.tensor(
+                block_tables, dtype=torch.int32, pin_memory=True
+            ).cuda(non_blocking=True)
+            if block_tables
+            else None,
         )
         return input_ids
-
 
     # prepare input data for decoding
     def prepare_decode(self, seqs: list[Sequence]) -> torch.Tensor:
         input_ids = []
-        context_lens = []   
-        slot_mappings = []  
+        context_lens = []
+        slot_mappings = []
         block_tables = []
         for seq in seqs:
             input_ids.append(seq.last_token)
             context_lens.append(len(seq))
-            slot_mappings.append(seq.block_table[-1] * self.block_size + seq.last_block_num_tokens - 1)
+            slot_mappings.append(
+                seq.block_table[-1] * self.block_size + seq.last_block_num_tokens - 1
+            )
         all_block_tables = [seq.block_table for seq in seqs]
         max_num_blocks = max(len(bt) for bt in all_block_tables)
         for i, seq in enumerate(seqs):
-            block_table = seq.block_table + [-1]*(max_num_blocks - len(seq.block_table))
+            block_table = seq.block_table + [-1] * (
+                max_num_blocks - len(seq.block_table)
+            )
             block_tables.append(block_table)
-        input_ids = torch.tensor(input_ids, dtype=torch.long, pin_memory=True).cuda(non_blocking=True)
+        input_ids = torch.tensor(input_ids, dtype=torch.long, pin_memory=True).cuda(
+            non_blocking=True
+        )
         set_context(
             is_prefill=False,
             cu_seqlens_q=None,
             cu_seqlens_k=None,
             max_seqlen_q=0,
             max_seqlen_k=0,
-            slot_mapping=torch.tensor(slot_mappings, dtype=torch.long, pin_memory=True).cuda(non_blocking=True),
-            context_lens=torch.tensor(context_lens, dtype=torch.long, pin_memory=True).cuda(non_blocking=True),
-            block_tables=torch.tensor(block_tables, dtype=torch.int32, pin_memory=True).cuda(non_blocking=True) if block_tables else None,
+            slot_mapping=torch.tensor(
+                slot_mappings, dtype=torch.long, pin_memory=True
+            ).cuda(non_blocking=True),
+            context_lens=torch.tensor(
+                context_lens, dtype=torch.long, pin_memory=True
+            ).cuda(non_blocking=True),
+            block_tables=torch.tensor(
+                block_tables, dtype=torch.int32, pin_memory=True
+            ).cuda(non_blocking=True)
+            if block_tables
+            else None,
         )
-        return input_ids    
+        return input_ids
 
     # prepare the temperature
     def prepare_sample(self, seqs: list[Sequence]) -> None:
-        return torch.tensor([seq.temperature for seq in seqs], dtype=torch.float32, pin_memory=True).cuda(non_blocking=True)
+        return torch.tensor(
+            [seq.temperature for seq in seqs], dtype=torch.float32, pin_memory=True
+        ).cuda(non_blocking=True)
 
     # when prefilling, directly compute model forward + logits
     # when decoding, use cuda graph execution to speed up
@@ -313,18 +389,19 @@ class ModelRunner:
             graph = self.graphs[next(bs_ for bs_ in self.graphs.keys() if bs_ >= bs)]
             vars = self.graph_vars
             # copy input data into graph variables
-            vars['input_ids'][:bs].copy_(input_ids)
-            vars['slot_mapping'][:bs].fill_(-1)
-            vars['slot_mapping'][:bs].copy_(context.slot_mapping)
+            vars["input_ids"][:bs].copy_(input_ids)
+            vars["slot_mapping"][:bs].fill_(-1)
+            vars["slot_mapping"][:bs].copy_(context.slot_mapping)
             vars["context_lens"].zero_()
-            vars['context_lens'][:bs].copy_(context.context_lens)
-            vars["block_tables"][:bs, :context.block_tables.size(1)] = context.block_tables
+            vars["context_lens"][:bs].copy_(context.context_lens)
+            vars["block_tables"][:bs, : context.block_tables.size(1)] = (
+                context.block_tables
+            )
             # replay the graph
             graph.replay()
-            logits = self.model.compute_logits(vars['outputs'][:bs])
+            logits = self.model.compute_logits(vars["outputs"][:bs])
 
         return logits
-
 
     # prepare prefill
     # prepare sample
@@ -352,20 +429,24 @@ class ModelRunner:
     # (later use graph.replay() to run the captured graph)
     @torch.inference_mode()
     def capture_cudagraph(self) -> None:
-        max_bs = self.config['max_num_seqs']
-        max_len = self.config['max_model_length']
+        max_bs = self.config["max_num_seqs"]
+        max_len = self.config["max_model_length"]
         max_num_blocks = math.ceil(max_len / self.block_size)
         # for decoding, input is always of shape (batch_size, 1)
-        input_ids = torch.zeros(max_bs, dtype=torch.long, device=f'cuda:{self.rank}')
+        input_ids = torch.zeros(max_bs, dtype=torch.long, device=f"cuda:{self.rank}")
         # for paged attention
         # where to write new KV values in the cache
-        slot_mapping = torch.zeros(max_bs, dtype=torch.long, device=f'cuda:{self.rank}')
+        slot_mapping = torch.zeros(max_bs, dtype=torch.long, device=f"cuda:{self.rank}")
         # how many tokens each sequence has processed
-        context_lens = torch.zeros(max_bs, dtype=torch.long, device=f'cuda:{self.rank}')
+        context_lens = torch.zeros(max_bs, dtype=torch.long, device=f"cuda:{self.rank}")
         # where to read KV values in the cache
-        block_tables = torch.zeros(max_bs, max_num_blocks, dtype=torch.int32, device=f'cuda:{self.rank}')
+        block_tables = torch.zeros(
+            max_bs, max_num_blocks, dtype=torch.int32, device=f"cuda:{self.rank}"
+        )
         # output logits
-        outputs = torch.zeros(max_bs, self.config['vocab_size'], device=f'cuda:{self.rank}')
+        outputs = torch.zeros(
+            max_bs, self.config["vocab_size"], device=f"cuda:{self.rank}"
+        )
 
         # graphs to be captured for different batch sizes
         batch_sizes = [1, 2, 4, 8] + list(range(16, max_bs + 1, 16))

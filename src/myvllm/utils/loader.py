@@ -1,15 +1,17 @@
-import torch
-from torch import nn
 import os
-from safetensors import safe_open
-from transformers import AutoConfig
 import re
+
+import torch
+from safetensors import safe_open
+from torch import nn
 
 
 def default_weight_loader(param, weight):
     """Default weight loader that copies weight data to parameter."""
     if param.shape != weight.shape:
-        raise ValueError(f"Shape mismatch: param {param.shape} vs weight {weight.shape}")
+        raise ValueError(
+            f"Shape mismatch: param {param.shape} vs weight {weight.shape}"
+        )
     param.data.copy_(weight)
 
 
@@ -28,7 +30,7 @@ def load_weights_from_checkpoint(model: nn.Module, model_name_or_path: str):
     checkpoint_path = None
 
     # First, try local paths
-    if model_name_or_path.startswith('~'):
+    if model_name_or_path.startswith("~"):
         checkpoint_path = os.path.expanduser(model_name_or_path)
     elif os.path.isdir(model_name_or_path):
         checkpoint_path = model_name_or_path
@@ -39,7 +41,11 @@ def load_weights_from_checkpoint(model: nn.Module, model_name_or_path: str):
             checkpoint_path = snapshot_download(
                 repo_id=model_name_or_path,
                 allow_patterns=["*.safetensors", "*.json"],
-                ignore_patterns=["*.msgpack", "*.h5", "*.bin"]  # Skip non-safetensors weights
+                ignore_patterns=[
+                    "*.msgpack",
+                    "*.h5",
+                    "*.bin",
+                ],  # Skip non-safetensors weights
             )
         except Exception as e:
             raise ValueError(
@@ -52,7 +58,9 @@ def load_weights_from_checkpoint(model: nn.Module, model_name_or_path: str):
         raise ValueError(f"Checkpoint path not found: {checkpoint_path}")
 
     # Load all safetensors files in the checkpoint directory
-    safetensor_files = [f for f in os.listdir(checkpoint_path) if f.endswith('.safetensors')]
+    safetensor_files = [
+        f for f in os.listdir(checkpoint_path) if f.endswith(".safetensors")
+    ]
 
     if not safetensor_files:
         raise ValueError(f"No .safetensors files found in {checkpoint_path}")
@@ -61,7 +69,7 @@ def load_weights_from_checkpoint(model: nn.Module, model_name_or_path: str):
     hf_weights = {}
     for file in sorted(safetensor_files):
         file_path = os.path.join(checkpoint_path, file)
-        with safe_open(file_path, framework='pt', device='cpu') as f:
+        with safe_open(file_path, framework="pt", device="cpu") as f:
             for weight_name in f.keys():
                 hf_weights[weight_name] = f.get_tensor(weight_name)
 
@@ -73,12 +81,12 @@ def load_weights_from_checkpoint(model: nn.Module, model_name_or_path: str):
     for hf_name, hf_weight in hf_weights.items():
         try:
             # 1. Handle QKV merge (q_proj + k_proj + v_proj → qkv_projection)
-            if '.self_attn.q_proj.weight' in hf_name:
-                layer_match = re.search(r'layers\.(\d+)', hf_name)
+            if ".self_attn.q_proj.weight" in hf_name:
+                layer_match = re.search(r"layers\.(\d+)", hf_name)
                 if layer_match:
                     layer_idx = layer_match.group(1)
-                    k_name = hf_name.replace('q_proj', 'k_proj')
-                    v_name = hf_name.replace('q_proj', 'v_proj')
+                    k_name = hf_name.replace("q_proj", "k_proj")
+                    v_name = hf_name.replace("q_proj", "v_proj")
 
                     if k_name in hf_weights and v_name in hf_weights:
                         q_weight = hf_weight
@@ -88,7 +96,9 @@ def load_weights_from_checkpoint(model: nn.Module, model_name_or_path: str):
                         # Concatenate q, k, v along output dimension
                         qkv_weight = torch.cat([q_weight, k_weight, v_weight], dim=0)
 
-                        custom_name = f"model.layers.{layer_idx}.self_attn.qkv_projection.weight"
+                        custom_name = (
+                            f"model.layers.{layer_idx}.self_attn.qkv_projection.weight"
+                        )
                         try:
                             param = model.get_parameter(custom_name)
                             param.data.copy_(qkv_weight)
@@ -100,11 +110,11 @@ def load_weights_from_checkpoint(model: nn.Module, model_name_or_path: str):
                             skipped_params.append((custom_name, "Parameter not found"))
 
             # 2. Handle gate_up merge (gate_proj + up_proj → gate_up)
-            elif '.mlp.gate_proj.weight' in hf_name:
-                layer_match = re.search(r'layers\.(\d+)', hf_name)
+            elif ".mlp.gate_proj.weight" in hf_name:
+                layer_match = re.search(r"layers\.(\d+)", hf_name)
                 if layer_match:
                     layer_idx = layer_match.group(1)
-                    up_name = hf_name.replace('gate_proj', 'up_proj')
+                    up_name = hf_name.replace("gate_proj", "up_proj")
 
                     if up_name in hf_weights:
                         gate_weight = hf_weight
@@ -124,11 +134,11 @@ def load_weights_from_checkpoint(model: nn.Module, model_name_or_path: str):
                             skipped_params.append((custom_name, "Parameter not found"))
 
             # 3. Handle gate_up merge for bias (if present)
-            elif '.mlp.gate_proj.bias' in hf_name:
-                layer_match = re.search(r'layers\.(\d+)', hf_name)
+            elif ".mlp.gate_proj.bias" in hf_name:
+                layer_match = re.search(r"layers\.(\d+)", hf_name)
                 if layer_match:
                     layer_idx = layer_match.group(1)
-                    up_bias_name = hf_name.replace('gate_proj', 'up_proj')
+                    up_bias_name = hf_name.replace("gate_proj", "up_proj")
 
                     if up_bias_name in hf_weights:
                         gate_bias = hf_weight
@@ -146,9 +156,11 @@ def load_weights_from_checkpoint(model: nn.Module, model_name_or_path: str):
                             skipped_params.append((custom_name, "Parameter not found"))
 
             # 4. Skip k_proj, v_proj, up_proj (already merged)
-            elif any(x in hf_name for x in ['.k_proj.', '.v_proj.', '.up_proj.']):
+            elif any(x in hf_name for x in [".k_proj.", ".v_proj.", ".up_proj."]):
                 if hf_name not in loaded_params:
-                    skipped_params.append((hf_name, "Merged into qkv_projection or gate_up"))
+                    skipped_params.append(
+                        (hf_name, "Merged into qkv_projection or gate_up")
+                    )
 
             # 5. All other parameters: load directly (names match HF)
             else:
@@ -176,13 +188,17 @@ def load_weights_from_checkpoint(model: nn.Module, model_name_or_path: str):
         if name not in loaded_params:
             unloaded_params.append(name)
 
-    print(f"\n{'='*80}")
-    print(f"Weight Loading Summary:")
-    print(f"{'='*80}")
-    print(f"Successfully loaded: {len([p for p in loaded_params if not any(x in p for x in ['.k_proj.', '.v_proj.', '.up_proj.'])])} parameter groups")
+    print(f"\n{'=' * 80}")
+    print("Weight Loading Summary:")
+    print(f"{'=' * 80}")
+    print(
+        f"Successfully loaded: {len([p for p in loaded_params if not any(x in p for x in ['.k_proj.', '.v_proj.', '.up_proj.'])])} parameter groups"
+    )
 
     if unloaded_params:
-        print(f"\n⚠️  WARNING: {len(unloaded_params)} model parameters NOT loaded from checkpoint:")
+        print(
+            f"\n WARNING: {len(unloaded_params)} model parameters NOT loaded from checkpoint:"
+        )
         for name in unloaded_params[:15]:
             param = dict(model.named_parameters())[name]
             print(f"  - {name} (shape: {param.shape}, mean: {param.data.mean():.6f})")
@@ -210,5 +226,5 @@ def load_weights_from_checkpoint(model: nn.Module, model_name_or_path: str):
             if len(no_mapping_skips) > 5:
                 print(f"  ... and {len(no_mapping_skips) - 5} more")
 
-    print(f"{'='*80}")
+    print(f"{'=' * 80}")
     return loaded_params

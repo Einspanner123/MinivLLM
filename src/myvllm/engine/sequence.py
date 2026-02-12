@@ -1,8 +1,9 @@
-from enum import Enum, auto
 import math
-from itertools import count 
-from myvllm.sampling_parameters import SamplingParams
 from copy import copy
+from enum import Enum, auto
+from itertools import count
+
+from myvllm.sampling_parameters import SamplingParams
 
 
 class SequenceStatus(Enum):
@@ -12,10 +13,10 @@ class SequenceStatus(Enum):
 
 
 class Sequence:
-    block_size = 256 # number of tokens per block
+    block_size = 256  # number of tokens per block
     counter = count()
 
-    def __init__(self, token_ids: list[int], sampling_params = SamplingParams()):
+    def __init__(self, token_ids: list[int], sampling_params=SamplingParams()):
         # record sequence id
         self.seq_id = next(Sequence.counter)
         # status
@@ -53,11 +54,11 @@ class Sequence:
 
     @property
     def prompt_token_ids(self):
-        return self.token_ids[:self.num_prompt_tokens]
+        return self.token_ids[: self.num_prompt_tokens]
 
     @property
     def completion_token_ids(self):
-        return self.token_ids[self.num_prompt_tokens:]
+        return self.token_ids[self.num_prompt_tokens :]
 
     @property
     def num_cached_blocks(self):
@@ -70,29 +71,31 @@ class Sequence:
     @property
     def last_block_num_tokens(self):
         full_blocks = int(math.floor(self.num_tokens / self.block_size))
-        return len(self.token_ids[full_blocks * self.block_size : ])
+        return len(self.token_ids[full_blocks * self.block_size :])
 
     def block(self, i):
-        assert 0 <= i < self.num_blocks, f"Block index {i} out of range [0, {self.num_blocks})"
+        assert 0 <= i < self.num_blocks, (
+            f"Block index {i} out of range [0, {self.num_blocks})"
+        )
         if i == self.num_blocks - 1:
-            return self.token_ids[-self.last_block_num_tokens:]
+            return self.token_ids[-self.last_block_num_tokens :]
         else:
             start_idx = i * self.block_size
             end_idx = start_idx + self.block_size
-            return self.token_ids[start_idx : end_idx]
+            return self.token_ids[start_idx:end_idx]
 
     def append_token(self, token_id):
         self.token_ids.append(token_id)
         self.last_token = token_id
-        self.num_tokens += 1 
+        self.num_tokens += 1
 
     def __getstate__(self):
         return (
-            self.num_tokens, 
-            self.num_prompt_tokens, 
-            self.num_cached_tokens, 
+            self.num_tokens,
+            self.num_prompt_tokens,
+            self.num_cached_tokens,
             self.block_table,
-            self.token_ids if self.num_completion_tokens == 0 else self.last_token
+            self.token_ids if self.num_completion_tokens == 0 else self.last_token,
         )
 
     def __setstate__(self, state):
@@ -101,7 +104,7 @@ class Sequence:
             self.num_prompt_tokens,
             self.num_cached_tokens,
             self.block_table,
-            last_token_or_ids
+            last_token_or_ids,
         ) = state
         # Check if this is prefill (num_completion_tokens == 0) or decode phase
         num_completion_tokens = self.num_tokens - self.num_prompt_tokens

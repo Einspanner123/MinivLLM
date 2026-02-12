@@ -1,7 +1,10 @@
+import torch
 import torch.nn as nn
-import torch 
 
-def apply_rotary_pos_emb(x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torch.Tensor:
+
+def apply_rotary_pos_emb(
+    x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor
+) -> torch.Tensor:
     # Handle both 3D varlen (total_tokens, num_heads, head_dim) and 4D batched (B, seq_len, num_heads, head_dim)
     if x.dim() == 3:
         # Varlen mode: (total_tokens, num_heads, head_dim)
@@ -46,19 +49,16 @@ def apply_rotary_pos_emb(x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) 
 
 
 class RotaryEmbedding(nn.Module):
-    def __init__(
-        self, 
-        base:int,
-        rotary_embedding: int, 
-        max_position: int = 2048
-    ):
+    def __init__(self, base: int, rotary_embedding: int, max_position: int = 2048):
         super().__init__()
         self.base = base
         # how many dimensions to apply rotary embedding
         self.rotary_embedding = rotary_embedding
         # max position that the long context can reach
         self.max_position = max_position
-        self.inv_freq = 1/(base ** (torch.arange(0, self.rotary_embedding, 2)/self.rotary_embedding))
+        self.inv_freq = 1 / (
+            base ** (torch.arange(0, self.rotary_embedding, 2) / self.rotary_embedding)
+        )
 
         positions = torch.arange(self.max_position).float()
         # (max_position, rotary_embedding/2)
@@ -79,7 +79,7 @@ class RotaryEmbedding(nn.Module):
         cos, sin = cos_sin.chunk(2, dim=-1)
         return (
             apply_rotary_pos_emb(query, cos, sin),
-            apply_rotary_pos_emb(key, cos, sin)
+            apply_rotary_pos_emb(key, cos, sin),
         )
 
 
@@ -101,4 +101,3 @@ if __name__ == "__main__":
     print(freqs.size())
 
     print(freqs[2])
-

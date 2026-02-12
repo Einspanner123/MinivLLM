@@ -1,13 +1,13 @@
 import torch
-from torch import nn
-import torch.nn.functional as F
 import torch.distributed as dist
+import torch.nn.functional as F
+from torch import nn
 
 from myvllm.utils import get_context
 
-
 # vocabparallelembedding
 # shard over the number of vocab, not the embedding size
+
 
 class VocabParallelEmbedding(nn.Module):
     def __init__(self, num_embeddings: int, embedding_dim: int):
@@ -18,12 +18,16 @@ class VocabParallelEmbedding(nn.Module):
         # keep the original num_embeddings
         self.num_embeddings = num_embeddings
         # pad to make it divisible by tp_size
-        self.padded_num_embeddings = (num_embeddings + self.tp_size - 1) // self.tp_size * self.tp_size
+        self.padded_num_embeddings = (
+            (num_embeddings + self.tp_size - 1) // self.tp_size * self.tp_size
+        )
         # this is the num_embeddings per partition in this current GPU
         self.num_embeddings_per_partition = self.padded_num_embeddings // self.tp_size
         self.embedding_dim = embedding_dim
 
-        self.weight = nn.Parameter(torch.empty(self.num_embeddings_per_partition, embedding_dim))
+        self.weight = nn.Parameter(
+            torch.empty(self.num_embeddings_per_partition, embedding_dim)
+        )
         self.weight.weight_loader = self.weight_loader
 
     def weight_loader(self, param: nn.Parameter, loaded_weights: torch.Tensor):
@@ -48,9 +52,11 @@ class VocabParallelEmbedding(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         # mask for tokens in this partition's range and within original vocab size
-        mask = (x >= self.tp_rank * self.num_embeddings_per_partition) & \
-               (x < (self.tp_rank + 1) * self.num_embeddings_per_partition) & \
-               (x < self.num_embeddings)
+        mask = (
+            (x >= self.tp_rank * self.num_embeddings_per_partition)
+            & (x < (self.tp_rank + 1) * self.num_embeddings_per_partition)
+            & (x < self.num_embeddings)
+        )
         x = mask * (x - self.tp_rank * self.num_embeddings_per_partition)
         output = F.embedding(x, self.weight)
 
@@ -59,6 +65,7 @@ class VocabParallelEmbedding(nn.Module):
             output = mask.unsqueeze(1) * output
             dist.all_reduce(output, op=dist.ReduceOp.SUM)
         return output
+
 
 # weight tying with embedding layer
 class ParallelLMHead(VocabParallelEmbedding):
@@ -72,7 +79,9 @@ class ParallelLMHead(VocabParallelEmbedding):
         if context.is_prefill:
             # cu_seqlens_q = [0, 5, 8, 12]
             # last_indices = [5, 8, 12] - 1 = [4, 7, 11]
-            last_token = context.cu_seqlens_q[1:] - 1  # exclude the first element which is 0
+            last_token = (
+                context.cu_seqlens_q[1:] - 1
+            )  # exclude the first element which is 0
             x = x[last_token].contiguous()
 
         # logits: [batch_size, seq_len, vocab_size_per_partition]
@@ -80,7 +89,14 @@ class ParallelLMHead(VocabParallelEmbedding):
         logits = torch.nn.functional.linear(x, self.weight)
         if self.tp_size > 1:
             # prepare for all_gather only for GPU 0 which is the main GPU
-            all_logits = [torch.empty(logits.size(), device=logits.device) for _ in range(self.tp_size)] if self.tp_rank == 0 else None
+            all_logits = (
+                [
+                    torch.empty(logits.size(), device=logits.device)
+                    for _ in range(self.tp_size)
+                ]
+                if self.tp_rank == 0
+                else None
+            )
             # dist.gather collects the logits from all GPUs to GPU 0
             dist.gather(logits, gather_list=all_logits, dst=0)
             # concatenate
@@ -88,6 +104,6 @@ class ParallelLMHead(VocabParallelEmbedding):
                 # [batch_size, seq_len, padded_vocab_size]
                 logits = torch.cat(all_logits, dim=-1)
                 # trim to original vocab size
-                logits = logits[..., :self.num_embeddings]
+                logits = logits[..., : self.num_embeddings]
 
         return logits

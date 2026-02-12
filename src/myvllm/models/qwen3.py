@@ -1,8 +1,21 @@
-from myvllm.layers import *
-import torch 
+import torch
+import torch.distributed as dist
 import torch.nn as nn
 
-# Qwen3Attention: 
+from myvllm.layers import (
+    Attention,
+    LayerNorm,
+    MergedColumnParallelLinear,
+    ParallelLMHead,
+    QKVColumnParallelLinear,
+    RotaryEmbedding,
+    RowParallelLinear,
+    SiluAndMul,
+    VocabParallelEmbedding,
+)
+
+
+# Qwen3Attention:
 # qkv projection
 # if not qkv_bias: then rms_norm
 # apply rotary embedding to q, k
@@ -28,7 +41,9 @@ class Qwen3Attention(nn.Module):
         self.total_num_heads = num_heads
         self.num_heads = num_heads // self.tp_size
 
-        self.total_num_kv_heads = num_kv_heads if num_kv_heads is not None else num_heads
+        self.total_num_kv_heads = (
+            num_kv_heads if num_kv_heads is not None else num_heads
+        )
         # self.num_kv_heads is per-GPU value (divided by tp_size)
         self.num_kv_heads = self.total_num_kv_heads // self.tp_size
 
@@ -51,17 +66,11 @@ class Qwen3Attention(nn.Module):
         self.k_norm = LayerNorm(torch.ones(head_dim))
 
         self.rotary_emb = RotaryEmbedding(
-            base=base,
-            rotary_embedding=head_dim,
-            max_position=max_position
+            base=base, rotary_embedding=head_dim, max_position=max_position
         )
 
         self.attention = Attention(
-            self.num_heads,
-            head_dim,
-            scale,
-            self.num_kv_heads,
-            block_size
+            self.num_heads, head_dim, scale, self.num_kv_heads, block_size
         )
 
         self.o_proj = RowParallelLinear(
@@ -71,7 +80,7 @@ class Qwen3Attention(nn.Module):
         )
 
     def forward(
-        self, 
+        self,
         x: torch.Tensor,
         positions: torch.Tensor,
     ) -> torch.Tensor:
@@ -111,9 +120,8 @@ class Qwen3Attention(nn.Module):
             k = self.k_norm(k)
 
         # DEBUG: Print positions to diagnose issue
-        import sys
 
-        q, k = self.rotary_emb(positions, q, k) 
+        q, k = self.rotary_emb(positions, q, k)
 
         o = self.attention(q, k, v)
         # o shape: (B*N, num_heads, head_dim)     - Per-GPU, different heads per GPU
@@ -124,6 +132,7 @@ class Qwen3Attention(nn.Module):
         # Output: (B*N, hidden_size) REPLICATED on all GPUs (after all_reduce)
 
         return o
+
 
 # Qwen3MLP
 # gate_up
@@ -197,7 +206,9 @@ class Qwen3DecoderLayer(nn.Module):
             bias=ffn_bias,
         )
 
-    def forward(self, x: torch.Tensor, residual: torch.Tensor | None = None) -> torch.Tensor:
+    def forward(
+        self, x: torch.Tensor, residual: torch.Tensor | None = None
+    ) -> torch.Tensor:
         if residual is not None:
             x, residual = self.input_layernorm(x, residual)
         else:
@@ -205,13 +216,14 @@ class Qwen3DecoderLayer(nn.Module):
             x = self.input_layernorm(x)
         # Compute positions based on context (respecting sequence boundaries for batched prefill)
         from myvllm.utils import get_context
+
         context = get_context()
         if context.is_prefill and context.cu_seqlens_q is not None:
             # For batched prefill, create positions that restart at 0 for each sequence
             positions = []
             cu_seqlens = context.cu_seqlens_q.cpu().tolist()
             for i in range(len(cu_seqlens) - 1):
-                seq_len = cu_seqlens[i+1] - cu_seqlens[i]
+                seq_len = cu_seqlens[i + 1] - cu_seqlens[i]
                 positions.extend(range(seq_len))
             positions = torch.tensor(positions, dtype=torch.long, device=x.device)
         elif context.is_prefill:
@@ -226,6 +238,7 @@ class Qwen3DecoderLayer(nn.Module):
         x, residual = self.post_attention_layernorm(x, residual)
         x = self.mlp(x)
         return x, residual
+
 
 # Qwen3Model
 # embedding
@@ -251,25 +264,27 @@ class Qwen3Model(nn.Module):
     ):
         super().__init__()
         self.embed_tokens = VocabParallelEmbedding(
-            num_embeddings=vocab_size,
-            embedding_dim = hidden_size
+            num_embeddings=vocab_size, embedding_dim=hidden_size
         )
-        self.layers = nn.ModuleList([
-            Qwen3DecoderLayer(
-                hidden_size=hidden_size,
-                num_heads=num_heads,
-                head_dim=head_dim,
-                scale=scale,
-                num_kv_heads=num_kv_heads,
-                rms_norm_epsilon=rms_norm_epsilon,
-                qkv_bias=qkv_bias,
-                base=base,
-                max_position=max_position,
-                intermediate_size=intermediate_size,
-                ffn_bias=ffn_bias,
-                block_size=block_size,
-            ) for _ in range(num_layers)
-        ])
+        self.layers = nn.ModuleList(
+            [
+                Qwen3DecoderLayer(
+                    hidden_size=hidden_size,
+                    num_heads=num_heads,
+                    head_dim=head_dim,
+                    scale=scale,
+                    num_kv_heads=num_kv_heads,
+                    rms_norm_epsilon=rms_norm_epsilon,
+                    qkv_bias=qkv_bias,
+                    base=base,
+                    max_position=max_position,
+                    intermediate_size=intermediate_size,
+                    ffn_bias=ffn_bias,
+                    block_size=block_size,
+                )
+                for _ in range(num_layers)
+            ]
+        )
         gamma = torch.ones(hidden_size)
         self.norm = LayerNorm(gamma)
 
@@ -282,17 +297,17 @@ class Qwen3Model(nn.Module):
         return x
 
 
-
 # Qwen3ForCausalLM
 # add lm_head on top of Qwen3Model
 class Qwen3ForCausalLM(nn.Module):
     packed_module_mapping = {
-        "q_proj": ('q_proj', 'q'),
-        "k_proj": ('k_proj', 'k'),
-        "v_proj": ('v_proj', 'v'),
-        "gate_up": ('gate_up_proj', '0'),
-        "gate_down": ('gate_down_proj', '1'),
+        "q_proj": ("q_proj", "q"),
+        "k_proj": ("k_proj", "k"),
+        "v_proj": ("v_proj", "v"),
+        "gate_up": ("gate_up_proj", "0"),
+        "gate_down": ("gate_down_proj", "1"),
     }
+
     def __init__(
         self,
         vocab_size: int,
@@ -330,19 +345,19 @@ class Qwen3ForCausalLM(nn.Module):
             block_size=block_size,
         )
         self.lm_head = ParallelLMHead(
-            num_embeddings=vocab_size,
-            embedding_dim=hidden_size
+            num_embeddings=vocab_size, embedding_dim=hidden_size
         )
         if tie_word_embeddings:
             self.lm_head.weight = self.model.embed_tokens.weight
 
     def forward(self, input_ids: torch.Tensor) -> torch.Tensor:
         x = self.model(input_ids)
-        return x 
+        return x
 
     def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor:
         logits = self.lm_head(hidden_states)
         return logits
+
 
 if __name__ == "__main__":
     model = Qwen3ForCausalLM(
